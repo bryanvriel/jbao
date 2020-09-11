@@ -1,2 +1,3 @@
-# jbao
-Wrapper for jax-based machine learning tools
+# What is `jbao`?
+
+`jbao` is a Python package containing classes and functions for wrapping `jax`- and `haiku`-based tools for machine learning and deep learning. The Chinese word "bao" means "to wrap", and steamed buns ("baozi") are delicious.
