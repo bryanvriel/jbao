@@ -18,7 +18,7 @@ def vgrad(func, *args, argnum=1):
     # Call it
     value = vmapped_grad(*args)
 
-    # Squeeze and return (in order to allow for subsequent gradients)
+    # Squeeze (in order to allow for subsequent gradients) and return
     return jnp.squeeze(value)
 
 # end of file
