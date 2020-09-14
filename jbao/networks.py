@@ -3,6 +3,7 @@
 import haiku as hk
 import jax
 import jax.numpy as jnp
+from functools import partial
 import sys
 import os
 
@@ -151,22 +152,28 @@ class DenseNetwork(Model):
         return params
 
 
-class SpatialNetwork(Model):
+class SpatialNetwork:
     """
     Specialized higher level dense network for taking in multiple spatial
     coordinates as inputs.
     """
 
-    def __init__(self, n_layers, hidden_units, input_dim=1, output_dim=1,
-                 name='model', **kwargs):
+    def __init__(self, n_layers, hidden_units, x_bounds, y_bounds,
+                 input_dim=1, output_dim=1, name='model', **kwargs):
 
-        # Initialize base model class
-        super().__init__(name=name)
+        # Save the name
+        self.name = name
 
         # Store the input and output dimension sizes
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.n_inputs = 2
+
+        # Store coordinate bounds
+        self.xmin, self.xmax = x_bounds
+        self.ymin, self.ymax = y_bounds
+        self.x_range = self.xmax - self.xmin
+        self.y_range = self.ymax - self.ymin
 
         # Transform the network function
         self.net = hk.without_apply_rng(hk.transform(
@@ -186,27 +193,34 @@ class SpatialNetwork(Model):
         # Send to network init
         return self.net.init(rng, *inputs)
 
-    #def dx(self, params, X, Y):
-    #    dx = 1.0e-5
-    #    fwd = self.net.apply(params[self.name], X + dx, Y)
-    #    bwd = self.net.apply(params[self.name], X - dx, Y)
-    #    return (fwd - bwd) / (2.0 * dx)
+    def apply(self, params, X, Y):
 
-    #def dy(self, params, X, Y):
-    #    dy = 1.0e-5
-    #    fwd = self.net.apply(params[self.name], X, Y + dy)
-    #    bwd = self.net.apply(params[self.name], X, Y - dy)
-    #    return (fwd - bwd) / (2.0 * dy)
+        # Normalize coordinates
+        Xn = (X - self.xmin) / self.x_range
+        Yn = (Y - self.ymin) / self.y_range
+
+        # Pass to network and return
+        return self.net.apply(params[self.name], Xn, Yn)
+
+    # Make an alias to apply for streamlined usage
+    def __call__(self, *args):
+        return self.apply(*args)
 
     def dx(self, params, X, Y):
-        gradfun = jax.vmap(jax.grad(self.net.apply, 1), in_axes=(None, 0, 0), out_axes=0)
-        return jnp.squeeze(gradfun(params[self.name], X, Y))
+        gradfun = jax.grad(self.apply, 1)
+        return jnp.squeeze(gradfun(params, X, Y))
 
     def dy(self, params, X, Y):
-        gradfun = jax.vmap(jax.grad(self.net.apply, 2), in_axes=(None, 0, 0), out_axes=0)
-        return jnp.squeeze(gradfun(params[self.name], X, Y))
+        gradfun = jax.grad(self.apply, 2)
+        return jnp.squeeze(gradfun(params, X, Y))
 
+    def dx2(self, params, X, Y):
+        gradfun = jax.grad(self.dx, 1)
+        return jnp.squeeze(gradfun(params, X, Y))
 
+    def dy2(self, params, X, Y):
+        gradfun = jax.grad(self.dy, 2)
+        return jnp.squeeze(gradfun(params, X, Y))
         
 
 # end of file
