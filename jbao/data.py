@@ -4,6 +4,7 @@ import numpy as np
 import sys
 import os
 
+from jbao import MultiVariable
 
 def atleast_2d(x):
     """
@@ -38,8 +39,9 @@ class Data:
     Class for representing and returning scattered points of solutions and coordinates.
     """
 
-    def __init__(self, *args, train_fraction=0.9, batch_size=1024, shuffle=True,
-                 seed=None, split_seed=None, **kwargs):
+    def __init__(self, *args, train_fraction=0.9, train_indices=None, test_indices=None,
+                 batch_size=1024, shuffle=True, seed=None, split_seed=None,
+                 full_traversal=True, **kwargs):
         """
         Initialize dictionary of data and batching options. Data should be passed in
         via the kwargs dictionary.
@@ -55,15 +57,20 @@ class Data:
         else:
             self.split_rng = np.random.RandomState(seed=seed)
 
-        # Assume the coordinate T exists to determine data size
+        # Cache first variable in order to get data shapes
+        _first_key = next(iter(kwargs))
+        self.n_data = kwargs[_first_key].shape[0]
+
+        # Generate train/test indices if not provided explicitly
         self.shuffle = shuffle
-        self.n_data = kwargs['T'].shape[0]
-    
-        # Generate train/test indices
-        itrain, itest = train_test_indices(self.n_data,
-                                           train_fraction=train_fraction,
-                                           shuffle=shuffle,
-                                           rng=self.split_rng)
+        if train_indices is None or test_indices is None:
+            itrain, itest = train_test_indices(self.n_data,
+                                               train_fraction=train_fraction,
+                                               shuffle=shuffle,
+                                               rng=self.split_rng)
+        else:
+            itrain = train_indices
+            itest = test_indices
 
         # Unpack the data for training
         self.keys = sorted(kwargs.keys())
@@ -77,10 +84,11 @@ class Data:
             self._test[key] = kwargs[key][itest]
 
         # Cache training and batch size
-        self.n_train = self._train['T'].shape[0]
+        self.n_train = self._train[_first_key].shape[0]
         self.n_test = self.n_data - self.n_train
         self.batch_size = batch_size
         self.n_batches = int(np.ceil(self.n_train / self.batch_size))
+        self.full_traversal = full_traversal
 
         # Initialize training indices (data have already been shuffle, so only need arange here)
         self._itrain = np.arange(self.n_train, dtype=int)
@@ -93,35 +101,30 @@ class Data:
     def train_batch(self):
         """
         Get a random batch of training data as a dictionary. Ensure that we cycle through
-        complete set of training data (e.g., sample without replacement). NOTE: jax.jit
-        needs to know batch sizes at compile time, so in order to minimize compilation
-        time, we ensure that every train batch is the same batch size.
+        complete set of training data (e.g., sample without replacement)
         """
-        # If we've already reached the end of the training data, re-set counter with
-        # optional re-shuffling of training indices
-        if self._train_counter >= self.n_train:
-            self._train_counter = 0
-            if self.shuffle:
-                self._itrain = self.rng.permutation(self.n_train)
+        # If self.full_traversal, we iterate over training indices without replacement
+        if self.full_traversal:
 
-        # Construct slice for training data indices
-        islice = slice(self._train_counter, self._train_counter + self.batch_size)
-        indices = self._itrain[islice]
+            # If we've already reached the end of the training data, re-set counter with
+            # optional re-shuffling of training indices
+            if self._train_counter >= self.n_train:
+                self.reset_training()
 
-        # Since we want to maintain a constant batch size, pad indices with extra
-        # random sampling of training indices
-        if indices.size < self.batch_size:
-            n_pad = self.batch_size - indices.size
-            rand_ind = self.rng.choice(self._itrain, size=n_pad, replace=False)
-            indices = np.hstack((indices, rand_ind))
+            # Construct slice for training data indices
+            islice = slice(self._train_counter, self._train_counter + self.batch_size)
+            indices = self._itrain[islice]
 
-        # Get training data
-        result = {key: self._train[key][indices] for key in self.keys}
+        # Otherwise, randomly choose from full set of training indices
+        else:
+            indices = self.rng.choice(self.n_train, size=self.batch_size, replace=False)
+
+        # Get training data as a MultiVariable
+        result = MultiVariable({key: self._train[key][indices] for key in self.keys})
 
         # Update counter for training data
         self._train_counter += self.batch_size
 
-        # All done
         return result
 
     def test_batch(self, batch_size=None):
@@ -130,7 +133,7 @@ class Data:
         """
         batch_size = batch_size or self.batch_size
         ind = self.rng.choice(self.n_test, size=batch_size)
-        return {key: self._test[key][ind] for key in self.keys}
+        return MultiVariable({key: self._test[key][ind] for key in self.keys})
 
     @property
     def train(self):
@@ -154,6 +157,262 @@ class Data:
     def test(self, value):
         raise ValueError('Cannot set test variable.')
 
+    def reset_training(self):
+        """
+        Public interface to reset training iteration counter and optionall
+        re-shuffle traning indices
+        """
+        self._train_counter = 0
+        if self.shuffle:
+            self._itrain = self.rng.permutation(self.n_train)
+
+
+class DataCollection:
+    """
+    Class representing a collection of Data objects.
+    """
+
+    def __init__(self, *dataobj, **kwargs):
+        self.dataobj = dataobj
+        # Number of batches is maximum of objects
+        self.n_batches = max([data.n_batches for data in dataobj])
+
+    def train_batch(self):
+        batches = []
+        for data in self.dataobj:
+            batches.append(data.train_batch())
+        return batches
+
+    def test_batch(self):
+        batches = []
+        for data in self.dataobj:
+            batches.append(data.test_batch())
+        return batches
+
+    def reset_training(self):
+        for data in self.dataobj:
+            data.reset_training()
+
+
+class H5Data:
+    """
+    Class for representing and returning scattered points of solutions and coordinates
+    stored in an HDF5 file.
+    """
+
+    def __init__(self, h5file, keys, root='/', train_fraction=0.9, batch_size=1024,
+                 shuffle=True, seed=None, **kwargs):
+        """
+        Initialize dictionary of data and batching options. Data should be passed in
+        via the kwargs dictionary.
+        """
+        # Open HDF5 file
+        if not os.path.isfile(h5file):
+            raise FileNotFoundError('Cannot open HDF5 file %s' % h5file)
+        self.fid = h5py.File(h5file, 'r')
+
+        # Cache keys for datasets we wish to analyze
+        self.keys = keys
+
+        # Cache the root HDF5 path containing our datasets
+        self.root = root
+
+        # Create a random number generator
+        self.rng = np.random.RandomState(seed=seed)
+
+        # Assume the dataset T exists to determine data size
+        self.shuffle = shuffle
+        self.n_data = self.fid[os.path.join(root, 'T')].shape[0]
+
+        # Generate train/test indices
+        itrain, itest = train_test_indices(self.n_data,
+                                           train_fraction=train_fraction,
+                                           shuffle=shuffle,
+                                           rng=self.rng)
+
+        # Cache training and batch size
+        self.n_train = len(itrain)
+        self.n_test = len(itest)
+        self.batch_size = batch_size
+        self.n_batches = int(np.ceil(self.n_train / self.batch_size))
+
+        # Save indices
+        self._itrain = itrain
+        self._itest = itest
+
+        # Initialize counter for training data retrieval
+        self._train_counter = 0
+
+        return
+
+    def __del__(self):
+        self.fid.close()
+
+    def train_batch(self):
+        """
+        Get a random batch of training data as a dictionary. Ensure that we cycle through
+        complete set of training data (e.g., sample without replacement)
+        """
+        # If we've already reached the end of the training data, re-set counter with
+        # optional re-shuffling of training indices
+        if self._train_counter >= self.n_train:
+            self._train_counter = 0
+            if self.shuffle:
+                self._itrain = self.rng.permutation(self._itrain)
+
+        # Construct slice for training data indices
+        islice = slice(self._train_counter, self._train_counter + self.batch_size)
+
+        # Sort sliced training indices (need sorting due to h5py limitations)
+        indices = np.sort(self._itrain[islice])
+
+        # Get training data
+        result = MultiVariable(
+            {key: self.fid[os.path.join(self.root, key)][indices,...] for key in self.keys}
+        )
+
+        # Update counter for training data
+        self._train_counter += self.batch_size
+
+        # All done
+        return result
+
+    def test_batch(self):
+        """
+        Get a random batch of testing data as a dictionary.
+        """
+        # Make random test indices
+        indices = np.sort(self.rng.choice(self._itest, size=self.batch_size, replace=False))
+
+        # Get test data
+        return MultiVariable(
+            {key: self.fid[os.path.join(self.root, key)][indices,...] for key in self.keys}
+        )
+
+    @property
+    def test(self):
+        """
+        Get entire testing set.
+        """
+        ind = np.sort(self.itest)
+        return MultiVariable(
+            {key: self.fid[os.path.join(self.root, key)][ind] for key in self.keys}
+        )
+
+    @test.setter
+    def test(self, value):
+        raise ValueError('Cannot set test variable.')
+
+
+class RandomData:
+    """
+    Class for returning batches of random numbers..
+    """
+
+    def __init__(self, *args, batch_size=128, n_batches=100, seed=None, dist='normal',
+                 loc=0.0, scale=1.0, key='x', **kwargs):
+        """
+        Initialize random number generator parameters.
+        """
+        # Check nothing has been passed in *args
+        if len(args) > 0:
+            raise ValueError('Data does not accept non-keyword arguments.')
+
+        # Create a random number generator
+        self.rng = np.random.RandomState(seed=seed)
+
+        # Cache generation function
+        if dist == 'normal':
+            self.rfunc = self.rng.standard_normal
+        elif dist == 'uniform':
+            self.rfunc = self.rng.random
+        else:
+            raise ValueError("kwarg dist must be in ('normal', 'uniform')")
+        self.loc = loc
+        self.scale = scale
+        self.batch_size = batch_size
+        self.n_batches = n_batches
+        self.key = key
+
+        return
+
+    def train_batch(self):
+        """
+        Get a random batch of training data as a dictionary.
+        """
+        data = self.scale * self.rfunc(self.batch_size) + self.loc
+        return MultiVariable({self.key: data})
+
+    def test_batch(self, **kwargs):
+        """
+        Get a random batch of testing data as a dictionary.
+        """
+        return self.train_batch()
+
+    def reset_training(self):
+        """
+        Do nothing here.
+        """
+        pass
+
+
+class DataCollection:
+    """
+    Class representing a collection of Data objects.
+    """
+
+    def __init__(self, *dataobj, **kwargs):
+        self.dataobj = dataobj
+        # Number of batches is maximum of objects
+        self.n_batches = max([data.n_batches for data in dataobj])
+
+    def train_batch(self):
+        batches = []
+        for data in self.dataobj:
+            batches.append(data.train_batch())
+        return batches
+
+    def test_batch(self):
+        batches = []
+        for data in self.dataobj:
+            batches.append(data.test_batch())
+        return batches
+
+    def reset_training(self):
+        for data in self.dataobj:
+            data.reset_training()
+
+
+def h5read(filename, dataset):
+    """
+    Mimics the MATLAB function h5read for reading into a memory a specific dataset
+    provided by an H5 path.
+
+    Parameters
+    ----------
+    filename: str
+        Filename of HDF5 file to read from.
+    dataset: str or list of str
+        H5 path for dataset(s) to read.
+
+    Returns
+    -------
+    data: ndarray or list of ndarray
+        Array(s) for data.
+    """
+    if isinstance(dataset, str):
+        with h5py.File(filename, 'r') as fid:
+            data = fid[dataset][()]
+        return data
+    elif isinstance(dataset, (list, tuple)):
+        data = []
+        with h5py.File(filename, 'r') as fid:
+            for key in dataset:
+                data.append(fid[key][()])
+        return data
+    else:
+        raise ValueError('Must provide dataset as str or list of str')
+
 
 class Normalizer:
     """
@@ -161,11 +420,13 @@ class Normalizer:
     Here, we use the norm range [-1, 1] for pos=False or [0, 1] for pos=True.
     """
 
-    def __init__(self, xmin, xmax, pos=False):
+    def __init__(self, xmin, xmax, pos=False, log=False):
         self.xmin = xmin
         self.xmax = xmax
         self.denom = xmax - xmin
         self.pos = pos
+        self.log = log
+        self.log_eps = 0.05
 
     def __call__(self, x):
         """
@@ -179,8 +440,22 @@ class Normalizer:
         """
         if self.pos:
             return (x - self.xmin) / self.denom
+        elif self.log:
+            xn = (x - self.xmin + self.log_eps) / self.denom
+            return np.log(xn)
         else:
             return 2.0 * (x - self.xmin) / self.denom - 1.0
+
+    def forward_scale(self, scale):
+        """
+        Normalize a scale factor (e.g., a standard deviation).
+        """
+        if self.pos:
+            return scale / self.denom
+        elif self.log:
+            raise NotImplementedError
+        else:
+            return 2 * scale / self.denom
 
     def inverse(self, xn):
         """
@@ -188,8 +463,88 @@ class Normalizer:
         """
         if self.pos:
             return self.denom * xn + self.xmin
+        elif self.log:
+            return self.denom * np.exp(xn) + self.xmin - self.log_eps
         else:
             return 0.5 * self.denom * (xn + 1.0) + self.xmin
+
+    def inverse_scale(self, scale, *args):
+        """
+        Un-normalize a scale factor (e.g., a standard deviation).
+        """
+        if self.pos:
+            return self.denom * scale
+        elif self.log:
+            return (args[0] - self.xmin + self.log_eps) * scale
+        else:
+            return 0.5 * self.denom * scale
+
+
+class MultiNormalizer:
+    """
+    Encapsulates multiple Normalizer objects hashed by name.
+    """
+
+    def __init__(self, **kwargs):
+        self.normalizers = {}
+        for name, norm in kwargs.items():
+            assert isinstance(norm, Normalizer), 'Must pass in Normalizer as value'
+            self.normalizers[name] = norm
+
+    def __call__(self, multi_var):
+        """
+        Alias for MultiNormalizer.forward().
+        """
+        return self.forward(multi_var)
+
+    def forward(self, multi_var):
+        """
+        Performs normalization (forward pass) of MultiVariable instance. Returns a
+        new MultiVariable instance.
+        """
+        # Initialize output variable
+        out = MultiVariable()
+
+        # Iterate over variable names
+        for varname, normalizer in self.normalizers.items():
+            out[varname] = normalizer(multi_var[varname])
+
+        # Done
+        return out
+
+    def inverse(self, multi_var):
+        """
+        Performs inverse normalization (un-normalize) of MultiVariable instance. Returns a
+        new MultiVariable instance.
+        """
+        # Initialize output variable
+        out = MultiVariable()
+
+        # Iterate over variable names
+        for varname, normalizer in self.normalizers.items():
+            out[varname] = normalizer.inverse(multi_var[varname])
+
+        # Done
+        return out
+
+
+def compute_bounds(x, n_sigma=1.0, method='normal'):
+    """
+    Convenience method for computing reasonable normalization bounds for a given
+    data array. Uses either mean +/- n_sigma*stddev or [minval, maxval].
+    """
+    if method == 'normal':
+        mean = np.mean(x)
+        std = np.std(x)
+        lower = mean - n_sigma * std
+        upper = mean + n_sigma * std
+        return [lower, upper]
+    elif method == 'minmax':
+        maxval = np.nanmax(x)
+        minval = np.nanmin(x)
+        return [minval, maxval]
+    else:
+        raise ValueError('Unsupported bounds determination method')
 
 
 # end of file
