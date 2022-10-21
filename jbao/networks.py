@@ -15,14 +15,71 @@ class DenseNetwork(nn.Module):
     actfun: str = 'tanh'
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, training=True):
 
         # Cache the activation function
         actfun = getattr(nn, self.actfun)
 
         # Loop over layers
         for cnt, layer in enumerate(self.layers[:-1]):
-            x = actfun(nn.Dense(layer, name='layer%03d' % cnt)(x))
+            z = nn.Dense(layer, name='layer%03d' % cnt)(x)
+            x = actfun(z)
+        x = nn.Dense(self.layers[-1], name='out_layer')(x)
+
+        return x
+
+
+class DenseNetworkDropout(nn.Module):
+
+    layers: Sequence[int]
+    actfun: str = 'tanh'
+    dropout_rate: float = 0.5
+
+    @nn.compact
+    def __call__(self, x, deterministic=True):
+
+        # Cache the activation function
+        actfun = getattr(nn, self.actfun)
+
+        # First layer with no dropout
+        z = nn.Dense(self.layers[0], name='layer000')(x)
+        x = actfun(z)
+
+        # Loop over intermediate layers
+        for cnt, layer in enumerate(self.layers[1:-1]):
+            z = nn.Dense(layer, name='layer%03d' % (cnt + 1))(x)
+            z = actfun(z)
+            x = nn.Dropout(self.dropout_rate, deterministic=deterministic)(z)
+
+        # Output layer with no droput
+        x = nn.Dense(self.layers[-1], name='out_layer')(x)
+
+        return x
+
+
+class DenseNetworkBN(nn.Module):
+
+    layers: Sequence[int]
+    actfun: str = 'tanh'
+
+    @nn.compact
+    def __call__(self, x, training=True):
+
+        # Cache the activation function
+        actfun = getattr(nn, self.actfun)
+
+        # Batch normalization layer
+        norm = partial(nn.BatchNorm,
+                       use_running_average=not training,
+                       momentum=0.9,
+                       epsilon=1e-5,
+                       dtype=jnp.float64)
+
+        # Loop over layers
+        for cnt, layer in enumerate(self.layers[:-1]):
+            z = nn.Dense(layer, name='layer%03d' % cnt)(x)
+            z = norm()(z)
+            x = actfun(z)
         x = nn.Dense(self.layers[-1], name='out_layer')(x)
 
         return x
