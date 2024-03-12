@@ -1,183 +1,96 @@
 #-*- coding: utf-8 -*-
 
+from typing import Callable
+
 import jax
 import jax.numpy as jnp
-from flax import linen as nn
-from functools import partial
-from typing import Sequence
+
+from jaxtyping import Array, Float, Int, PRNGKeyArray
+import equinox as eqx
+
 import sys
 import os
 
 
-class DenseNetwork(nn.Module):
+class DenseNetwork(eqx.Module):
 
-    layers: Sequence[int]
-    actfun: str = 'tanh'
+    layers: list
+    activation: Callable = jax.nn.elu
 
-    @nn.compact
-    def __call__(self, x, **kwargs):
+    def __init__(
+        self,
+        layer_dims: list,
+        input_dim: Int,
+        output_dim: Int,
+        key: PRNGKeyArray,
+        activation: str = 'elu',
+    ):
+        # Fill out input and output layer dims
+        layer_dims = [input_dim,] + layer_dims + [output_dim,]
 
-        # Cache the activation function
-        actfun = getattr(nn, self.actfun)
+        # Create PRNG keys for each layer
+        n_layers = len(layer_dims) - 1
+        keys = jax.random.split(key, n_layers)
 
-        # Loop over layers
-        for cnt, layer in enumerate(self.layers[:-1]):
-            z = nn.Dense(layer, name='layer%03d' % cnt)(x)
-            x = actfun(z)
-        x = nn.Dense(self.layers[-1], name='out_layer')(x)
+        # Create list of linear layers
+        self.layers = []
+        for i in range(n_layers):
+            self.layers.append(eqx.nn.Linear(
+                in_features=layer_dims[i],
+                out_features=layer_dims[i + 1],
+                key=keys[i],
+            ))
 
-        return x
+        # Create activation function
+        self.activation = getattr(jax.nn, activation)
 
-
-class DenseNetworkDropout(nn.Module):
-
-    layers: Sequence[int]
-    actfun: str = 'tanh'
-    dropout_rate: float = 0.5
-
-    @nn.compact
-    def __call__(self, x, deterministic=True):
-
-        # Cache the activation function
-        actfun = getattr(nn, self.actfun)
-
-        # First layer with no dropout
-        z = nn.Dense(self.layers[0], name='layer000')(x)
-        x = actfun(z)
-
-        # Loop over intermediate layers
-        for cnt, layer in enumerate(self.layers[1:-1]):
-            z = nn.Dense(layer, name='layer%03d' % (cnt + 1))(x)
-            z = actfun(z)
-            x = nn.Dropout(self.dropout_rate, deterministic=deterministic)(z)
-
-        # Output layer with no droput
-        x = nn.Dense(self.layers[-1], name='out_layer')(x)
-
-        return x
-
-
-class DenseNetworkBN(nn.Module):
-
-    layers: Sequence[int]
-    actfun: str = 'tanh'
-
-    @nn.compact
-    def __call__(self, x, training=True):
-
-        # Cache the activation function
-        actfun = getattr(nn, self.actfun)
-
-        # Batch normalization layer
-        norm = partial(nn.BatchNorm,
-                       use_running_average=not training,
-                       momentum=0.9,
-                       epsilon=1e-5,
-                       dtype=jnp.float64)
-
-        # Loop over layers
-        for cnt, layer in enumerate(self.layers[:-1]):
-            z = nn.Dense(layer, name='layer%03d' % cnt)(x)
-            z = norm()(z)
-            x = actfun(z)
-        x = nn.Dense(self.layers[-1], name='out_layer')(x)
-
-        return x
-
-
-class DenseResnet(nn.Module):
-
-    layers: Sequence[int]
-    actfun: str = 'tanh'
-
-    @nn.compact
     def __call__(self, x):
-
-        # Cache the activation function
-        actfun = getattr(nn, self.actfun)
-
-        # Loop over layers
-        n_layers = len(self.layers)
-        for cnt, layer in enumerate(self.layers[:-1]):
-            z = actfun(nn.Dense(layer, name='layer%03d' % cnt)(x))
-            if cnt > 0:
-                x = x + z
-            else:
-                x = z
-        x = nn.Dense(self.layers[-1], name='out_layer')(x)
-
-        return x
+        for layer in self.layers[:-1]:
+            x = self.activation(layer(x))
+        return self.layers[-1](x)
 
 
-class SpatialNetwork:
-    """
-    Specialized higher level dense network for taking in multiple spatial
-    coordinates as inputs.
-    """
+class DenseResNet(eqx.Module):
 
-    def __init__(self, n_layers, hidden_units, x_bounds, y_bounds,
-                 input_dim=1, output_dim=1, name='model', **kwargs):
+    layers: list
+    activation: Callable = jax.nn.elu
 
-        # Save the name
-        self.name = name
+    def __init__(
+        self,
+        layer_dims: list,
+        input_dim: Int,
+        output_dim: Int,
+        key: PRNGKeyArray,
+        activation: str = 'elu',
+    ):
+        # Fill out input and output layer dims
+        layer_dims = [input_dim,] + layer_dims + [output_dim,]
 
-        # Store the input and output dimension sizes
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.n_inputs = 2
+        # Create PRNG keys for each layer
+        n_layers = len(layer_dims) - 1
+        keys = jax.random.split(key, n_layers)
 
-        # Store coordinate bounds
-        self.xmin, self.xmax = x_bounds
-        self.ymin, self.ymax = y_bounds
-        self.x_range = self.xmax - self.xmin
-        self.y_range = self.ymax - self.ymin
+        # Create list of linear layers
+        self.layers = []
+        for i in range(n_layers):
+            self.layers.append(eqx.nn.Linear(
+                in_features=layer_dims[i],
+                out_features=layer_dims[i + 1],
+                key=keys[i],
+            ))
 
-        # Transform the network function
-        self.net = hk.without_apply_rng(hk.transform(
-            lambda *dargs: _DenseNetwork(output_dim, n_layers, hidden_units,
-                                         name=name)(*dargs)
-        ))
+        # Create activation function
+        self.activation = getattr(jax.nn, activation)
 
-    def init_params(self, rng):
-        """
-        Randomly initialize parameters.
-        """
-        # Make list of inputs
-        inputs = []
-        for i in range(self.n_inputs):
-            inputs.append(jnp.zeros((1, self.input_dim), dtype=jnp.float32))
-
-        # Send to network init
-        return self.net.init(rng, *inputs)
-
-    def apply(self, params, X, Y):
-
-        # Normalize coordinates
-        Xn = (X - self.xmin) / self.x_range
-        Yn = (Y - self.ymin) / self.y_range
-
-        # Pass to network and return
-        return self.net.apply(params[self.name], Xn, Yn)
-
-    # Make an alias to apply for streamlined usage
-    def __call__(self, *args):
-        return self.apply(*args)
-
-    def dx(self, params, X, Y):
-        gradfun = jax.grad(self.apply, 1)
-        return jnp.squeeze(gradfun(params, X, Y))
-
-    def dy(self, params, X, Y):
-        gradfun = jax.grad(self.apply, 2)
-        return jnp.squeeze(gradfun(params, X, Y))
-
-    def dx2(self, params, X, Y):
-        gradfun = jax.grad(self.dx, 1)
-        return jnp.squeeze(gradfun(params, X, Y))
-
-    def dy2(self, params, X, Y):
-        gradfun = jax.grad(self.dy, 2)
-        return jnp.squeeze(gradfun(params, X, Y))
+    def __call__(self, x):
+        # Initial layer
+        x = self.layers[0](x)
+        # Intermediate layers with residual connection
+        for layer in self.layers[1:-1]:
+            z = self.activation(layer(x))
+            x = x + z
+        # Final layer
+        return self.layers[-1](x)
 
 
 # end of file
