@@ -4,8 +4,6 @@ import numpy as np
 import sys
 import os
 
-from jbao import MultiVariable
-
 def atleast_2d(x):
     """
     Convenience function to ensure arrays are column vectors.
@@ -90,7 +88,8 @@ class Data:
         self.n_batches = int(np.ceil(self.n_train / self.batch_size))
         self.full_traversal = full_traversal
 
-        # Initialize training indices (data have already been shuffle, so only need arange here)
+        # Initialize training indices
+        # (data have already been shuffle, so only need arange here)
         self._itrain = np.arange(self.n_train, dtype=int)
 
         # Initialize counter for training data retrieval
@@ -119,8 +118,8 @@ class Data:
         else:
             indices = self.rng.choice(self.n_train, size=self.batch_size, replace=False)
 
-        # Get training data as a MultiVariable
-        result = MultiVariable({key: self._train[key][indices] for key in self.keys})
+        # Get training data as a dict
+        result = {key: self._train[key][indices] for key in self.keys}
 
         # Update counter for training data
         self._train_counter += self.batch_size
@@ -133,7 +132,7 @@ class Data:
         """
         batch_size = batch_size or self.batch_size
         ind = self.rng.choice(self.n_test, size=batch_size)
-        return MultiVariable({key: self._test[key][ind] for key in self.keys})
+        return {key: self._test[key][ind] for key in self.keys}
 
     @property
     def train(self):
@@ -267,9 +266,10 @@ class H5Data:
         indices = np.sort(self._itrain[islice])
 
         # Get training data
-        result = MultiVariable(
-            {key: self.fid[os.path.join(self.root, key)][indices,...] for key in self.keys}
-        )
+        result = { 
+            key: self.fid[os.path.join(self.root, key)][indices,...]
+            for key in self.keys
+        }
 
         # Update counter for training data
         self._train_counter += self.batch_size
@@ -282,12 +282,15 @@ class H5Data:
         Get a random batch of testing data as a dictionary.
         """
         # Make random test indices
-        indices = np.sort(self.rng.choice(self._itest, size=self.batch_size, replace=False))
+        indices = np.sort(self.rng.choice(
+            self._itest, size=self.batch_size, replace=False
+        ))
 
         # Get test data
-        return MultiVariable(
-            {key: self.fid[os.path.join(self.root, key)][indices,...] for key in self.keys}
-        )
+        return {
+            key: self.fid[os.path.join(self.root, key)][indices,...]
+            for key in self.keys
+        }
 
     @property
     def test(self):
@@ -295,9 +298,10 @@ class H5Data:
         Get entire testing set.
         """
         ind = np.sort(self.itest)
-        return MultiVariable(
-            {key: self.fid[os.path.join(self.root, key)][ind] for key in self.keys}
-        )
+        return {
+            key: self.fid[os.path.join(self.root, key)][ind]
+            for key in self.keys
+        }
 
     @test.setter
     def test(self, value):
@@ -341,7 +345,7 @@ class RandomData:
         Get a random batch of training data as a dictionary.
         """
         data = self.scale * self.rfunc(self.batch_size) + self.loc
-        return MultiVariable({self.key: data})
+        return {self.key: data}
 
     def test_batch(self, **kwargs):
         """
@@ -354,33 +358,6 @@ class RandomData:
         Do nothing here.
         """
         pass
-
-
-class DataCollection:
-    """
-    Class representing a collection of Data objects.
-    """
-
-    def __init__(self, *dataobj, **kwargs):
-        self.dataobj = dataobj
-        # Number of batches is maximum of objects
-        self.n_batches = max([data.n_batches for data in dataobj])
-
-    def train_batch(self):
-        batches = []
-        for data in self.dataobj:
-            batches.append(data.train_batch())
-        return batches
-
-    def test_batch(self):
-        batches = []
-        for data in self.dataobj:
-            batches.append(data.test_batch())
-        return batches
-
-    def reset_training(self):
-        for data in self.dataobj:
-            data.reset_training()
 
 
 def h5read(filename, dataset):

@@ -15,7 +15,7 @@ class DenseNetwork(nn.Module):
     actfun: str = 'tanh'
 
     @nn.compact
-    def __call__(self, x, training=True):
+    def __call__(self, x, **kwargs):
 
         # Cache the activation function
         actfun = getattr(nn, self.actfun)
