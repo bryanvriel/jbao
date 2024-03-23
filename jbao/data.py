@@ -82,6 +82,7 @@ class Data:
             self._test[key] = kwargs[key][itest]
 
         # Cache training and batch size
+        self.n_data = kwargs[_first_key].shape[0]
         self.n_train = self._train[_first_key].shape[0]
         self.n_test = self.n_data - self.n_train
         self.batch_size = batch_size
@@ -522,6 +523,18 @@ def compute_bounds(x, n_sigma=1.0, method='normal'):
         return [minval, maxval]
     else:
         raise ValueError('Unsupported bounds determination method')
+
+
+def assemble_scale_tensors(norms, keys, dtype=np.float64):
+    """
+    Assembles linear transformation tensors for applying/inverting normalization
+    operations.
+    """
+    # Scale tensor
+    W = [norms[key].denom for key in keys]
+    # Bias tensor (1D)
+    b = [norms[key].xmin for key in keys]
+    return W, b
 
 
 # end of file

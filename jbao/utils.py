@@ -3,28 +3,32 @@
 import argparse
 import numpy as np
 import tomlkit
+import time
 
+def parse_toml(tomlfile, default=None):
 
-def parse_toml(tomlfile, default="default.toml"):
+    # Load defaults and then update if default provided
+    if default is not None:
+        with open(default, "r") as fid:
+            cfg = tomlkit.load(fid)
 
-    # First load defaults
-    with open(default, "r") as fid:
-        cfg = tomlkit.load(fid)
+        # Load specific configuration
+        with open(tomlfile, "r") as fid:
+            cfg_new = tomlkit.load(fid)
 
-    # Load specific configuration
-    with open(tomlfile, "r") as fid:
-        cfg_new = tomlkit.load(fid)
-
-    # Update sections
-    for key, value in cfg.items():
-        sub_cfg = cfg[key]
-        try:
-            sub_new = cfg_new[key]
-            sub_cfg.update(sub_new)
-        except KeyError:
-            pass
-        except NonExistentKey:
-            pass
+        # Update sections
+        for key, value in cfg.items():
+            sub_cfg = cfg[key]
+            try:
+                sub_new = cfg_new[key]
+                sub_cfg.update(sub_new)
+            except KeyError:
+                pass
+            except NonExistentKey:
+                pass
+    else:
+        with open(tomlfile, "r") as fid:
+            cfg = tomlkit.load(fid)
 
     # Convert all values to POPO
     cfg_popo = {}
@@ -122,6 +126,24 @@ def tomlkit_to_popo(d):
         result = bool(result)
 
     return result
+
+
+class Timer:
+    """
+    A simple timer class for use in context managers.
+    """
+
+    def __init__(self, desc='Timing context'):
+        self.desc = desc
+
+    def __enter__(self):
+        print(self.desc)
+        self.t0 = time.time()
+        return
+
+    def __exit__(self, *exc_args):
+        tf = time.time()
+        print(' - elapsed time: %f s' % (tf - self.t0))
 
 
 # end of file
