@@ -1,9 +1,25 @@
-#-*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 
 import argparse
 import numpy as np
 import tomlkit
 import time
+
+
+def update_dict(original, updates):
+    for key, value in updates.items():
+        if (
+            isinstance(value, dict)
+            and key in original
+            and isinstance(original[key], dict)
+        ):
+            # Recursively update sub-dictionaries
+            update_dict(original[key], value)
+        else:
+            # Update the value in the original dictionary
+            original[key] = value
+    return original
+
 
 def parse_toml(tomlfile, default=None):
 
@@ -16,16 +32,9 @@ def parse_toml(tomlfile, default=None):
         with open(tomlfile, "r") as fid:
             cfg_new = tomlkit.load(fid)
 
-        # Update sections
-        for key, value in cfg.items():
-            sub_cfg = cfg[key]
-            try:
-                sub_new = cfg_new[key]
-                sub_cfg.update(sub_new)
-            except KeyError:
-                pass
-            except NonExistentKey:
-                pass
+        # Update default
+        cfg = update_dict(cfg, cfg_new)
+
     else:
         with open(tomlfile, "r") as fid:
             cfg = tomlkit.load(fid)
@@ -33,18 +42,27 @@ def parse_toml(tomlfile, default=None):
     # Convert all values to POPO
     cfg_popo = {}
     for section_name, section in cfg.items():
-        cfg_popo[section_name] = {}
-        for key, value in section.items():
-            cfg_popo[section_name][key] = tomlkit_to_popo(value)
+        try:
+            cfg_popo[section_name] = {}
+            for key, value in section.items():
+                cfg_popo[section_name][key] = tomlkit_to_popo(value)
+        except AttributeError:
+            cfg_popo[section_name] = tomlkit_to_popo(section)
 
     # Return struct format
     return DictToStruct(cfg_popo)
+
+
+def save_toml(cfg, tomlfile):
+    with open(tomlfile, "w") as fid:
+        tomlkit.dump(cfg.todict(), fid)
 
 
 class DictToStruct:
     """
     Convenience class for converting dict to struct-like object.
     """
+
     def __init__(self, data_dict):
         for key, value in data_dict.items():
             if isinstance(value, dict):
@@ -52,11 +70,24 @@ class DictToStruct:
             else:
                 self.__dict__[key] = value
 
-    def set(self, key, value):
+    def update(self, path, value):
         """
-        Manually set key-value pair.
+        Returns a new DictToStruct instance with the updated value.
+        'path' should be a dot-separated string, e.g., 'user.profile.name'
         """
-        setattr(self, key, value)
+        # Convert the current object back to a dict
+        data = self.todict()
+
+        # Navigate/Update the dictionary
+        keys = path.split('.')
+        ref = data
+        for key in keys[:-1]:
+            ref = ref.setdefault(key, {})
+
+        ref[keys[-1]] = value
+
+        # Return a new instance
+        return DictToStruct(data)
 
     def __delattr__(self, *args, **kwargs):
         raise AttributeError("DictToStruct attributes cannot be deleted.")
@@ -76,10 +107,10 @@ class DictToStruct:
         return out
 
 
-def parse_args(description='Run program.'):
+def parse_args(description="Run program."):
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument('cfgfile', type=str, help='Configuration file.')
-    parser.add_argument('--restore', action='store_true', help='Restore checkpoints.')
+    parser.add_argument("cfgfile", type=str, help="Configuration file.")
+    parser.add_argument("--restore", action="store_true", help="Restore checkpoints.")
     return parser.parse_known_args()
 
 
@@ -89,15 +120,26 @@ def update_cfg_with_extra(cfg, extra_args):
     cdict = cfg.todict()
     n_args = len(extra_args) // 2
     for i in range(n_args):
-        key_str = extra_args[2*i][2:]
-        value_str = extra_args[2*i + 1]
-        keys = key_str.split('.')
-        try:
-            original_value = cdict[keys[0]][keys[1]]
-            cdict[keys[0]][keys[1]] = type(original_value)(value_str)
-        except KeyError:
-            print(f'Could not find cfg attribute {key_str}. Skipping.')
-            continue
+        key_str = extra_args[2 * i][2:]
+        value_str = extra_args[2 * i + 1]
+        keys = key_str.split(".")
+        # Detect any special type specifiers
+        if value_str[-2] == "@":
+            if value_str[-1] == "f":
+                value_type = float
+            elif value_str[-1] == "i":
+                value_type = int
+            else:
+                value_type = float
+            value_str = value_str[:-2]
+        else:
+            try:
+                original_value = cdict[keys[0]][keys[1]]
+                value_type = type(original_value)
+            except KeyError:
+                print(f"Could not find cfg attribute {key_str}. Skipping.")
+                continue
+        cdict[keys[0]][keys[1]] = value_type(value_str)
     return DictToStruct(cdict)
 
 
@@ -133,7 +175,7 @@ class Timer:
     A simple timer class for use in context managers.
     """
 
-    def __init__(self, desc='Timing context'):
+    def __init__(self, desc="Timing context"):
         self.desc = desc
 
     def __enter__(self):
@@ -143,7 +185,7 @@ class Timer:
 
     def __exit__(self, *exc_args):
         tf = time.time()
-        print(' - elapsed time: %f s' % (tf - self.t0))
+        print(" - elapsed time: %f s" % (tf - self.t0))
 
 
 # end of file
