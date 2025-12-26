@@ -44,10 +44,10 @@ class DenseNetwork(eqx.Module):
         # Create activation function
         self.activation = getattr(jax.nn, activation)
 
-    def __call__(self, x):
+    def __call__(self, x, *args, **kwargs):
         for layer in self.layers[:-1]:
             x = self.activation(layer(x))
-        return self.layers[-1](x)
+        return jnp.squeeze(self.layers[-1](x))
 
 
 class DenseResNet(eqx.Module):
