@@ -139,7 +139,16 @@ def update_cfg_with_extra(cfg, extra_args):
             except KeyError:
                 print(f"Could not find cfg attribute {key_str}. Skipping.")
                 continue
-        cdict[keys[0]][keys[1]] = value_type(value_str)
+        if value_type == bool:
+            if value_str.lower() in ("true", "1", "yes", "on"):
+                save_value = True
+            elif value_str.lower() in ("false", "0", "no", "off"):
+                save_value = False
+            else:
+                raise ValueError(f"Invalid boolean: {value}")
+        else:
+            save_value = value_type(value_str)
+        cdict[keys[0]][keys[1]] = save_value
     return DictToStruct(cdict)
 
 
