@@ -146,6 +146,10 @@ def update_cfg_with_extra(cfg, extra_args):
                 save_value = False
             else:
                 raise ValueError(f"Invalid boolean: {value}")
+        elif value_type == list:
+            elem_type = type(original_value[0]) # original_value may not be available?
+            items = [x.strip() for x in value_str.split(",")] # comma delimited
+            save_value = [elem_type(x) for x in items]
         else:
             save_value = value_type(value_str)
         cdict[keys[0]][keys[1]] = save_value
